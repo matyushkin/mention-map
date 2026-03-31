@@ -29,7 +29,7 @@ def normalize_name(name: str) -> str:
     name = re.sub(r"\|[^|]*=", "", name)
     name = re.sub(r"<[^>]+>", "", name)
     name = re.sub(r"\{\{[^}]*\}\}", "", name)
-    # Remove parenthetical dates/notes
+    # Remove parenthetical notes (but keep text before)
     name = re.sub(r"\s*\([^)]*\)\s*", " ", name)
     # Remove prefix like "~предполож."
     name = re.sub(r"^[~≈]?\s*предполож\.?\s*", "", name)
@@ -39,7 +39,34 @@ def normalize_name(name: str) -> str:
     name = " ".join(name.lower().split())
     # Remove «ё» → «е» ambiguity
     name = name.replace("ё", "е")
+    # Normalize doreform orthography → modern
+    name = name.replace("ъ", "").replace("ѣ", "е").replace("ѳ", "ф").replace("і", "и")
+    # Normalize common transliteration variants
+    name = name.replace("й", "й")  # combining breve normalization
     return name.strip()
+
+
+# Common name variants that should match
+NAME_ALIASES = {
+    "вильям шекспир": "уильям шекспир",
+    "вильям шекспиръ": "уильям шекспир",
+    "шекспир": "уильям шекспир",
+    "артур конан дойль": "артур конан дойл",
+    "жюль верн": "жюль верн",
+    "м е салтыков щедрин": "михаил евграфович салтыков-щедрин",
+    "м. е. салтыков щедрин": "михаил евграфович салтыков-щедрин",
+    "салтыков-щедрин": "михаил евграфович салтыков-щедрин",
+    "салтыков щедрин": "михаил евграфович салтыков-щедрин",
+    "максим горький": "максим горький",
+    "горький": "максим горький",
+    "ильф и петров": "ильф и петров",
+    "льюис кэрролл": "льюис кэрролл",
+    "льюис керролл": "льюис кэрролл",
+    "марк твен": "марк твен",
+    "о генри": "о. генри",
+    "г х андерсен": "ханс кристиан андерсен",
+    "ганс христиан андерсен": "ханс кристиан андерсен",
+}
 
 
 def build_author_index(authors_path: Path) -> dict:
@@ -73,15 +100,37 @@ def build_author_index(authors_path: Path) -> dict:
         family = t.column("family_name")[i].as_py() or ""
         given = t.column("given_names")[i].as_py() or ""
         if family:
-            # "Пушкин" alone
             norm_family = normalize_name(family)
-            # Don't index by family name alone — too ambiguous
 
-            # "Пушкин Александр Сергеевич" (reversed)
+            # "Фамилия Имя Отчество" (reversed order)
             if given:
                 reversed_name = normalize_name(f"{family} {given}")
                 if reversed_name not in index:
                     index[reversed_name] = entry
+
+            # Index by family name + first given name only
+            # "Толстой Лев" for matching "Лев Николаевич Толстой"
+            if given:
+                first_given = given.split()[0] if given else ""
+                short = normalize_name(f"{family} {first_given}")
+                if short not in index:
+                    index[short] = entry
+                short_rev = normalize_name(f"{first_given} {family}")
+                if short_rev not in index:
+                    index[short_rev] = entry
+
+        # Also add dehyphenated version of name
+        dehyph = norm.replace("-", " ")
+        dehyph = " ".join(dehyph.split())
+        if dehyph != norm and dehyph not in index:
+            index[dehyph] = entry
+
+    # Add reverse aliases
+    for alias, canonical in NAME_ALIASES.items():
+        norm_alias = normalize_name(alias)
+        norm_canonical = normalize_name(canonical)
+        if norm_canonical in index and norm_alias not in index:
+            index[norm_alias] = index[norm_canonical]
 
     return index
 
@@ -99,11 +148,31 @@ def match_author(author_str: str, index: dict) -> dict | None:
     if norm in index:
         return index[norm]
 
-    # Try removing "Автор:" prefix if present
+    # Try alias
+    if norm in NAME_ALIASES:
+        alias = normalize_name(NAME_ALIASES[norm])
+        if alias in index:
+            return index[alias]
+
+    # Try removing "Автор:" prefix
     if norm.startswith("автор:"):
         cleaned = norm.removeprefix("автор:").strip()
         if cleaned in index:
             return index[cleaned]
+
+    # Try removing hyphens/dashes (Салтыков-Щедрин → Салтыков Щедрин)
+    dehyphenated = norm.replace("-", " ").replace("—", " ")
+    dehyphenated = " ".join(dehyphenated.split())
+    if dehyphenated != norm and dehyphenated in index:
+        return index[dehyphenated]
+
+    # Try family name only match (last word) — only if unambiguous
+    words = norm.split()
+    if len(words) >= 2:
+        # Try "Фамилия Имя" → "Имя Фамилия" and vice versa
+        reversed_name = " ".join(words[1:] + words[:1])
+        if reversed_name in index:
+            return index[reversed_name]
 
     return None
 
