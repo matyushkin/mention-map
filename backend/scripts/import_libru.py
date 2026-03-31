@@ -37,10 +37,10 @@ SKIP_DIRS = {
     "COPYRIGHT", "SONGS", "KSP", "AQUARIUM",
 }
 
-# Hard line-wrap threshold: if most lines are close to this length,
-# the text is hard-wrapped prose and needs unwrapping
-WRAP_WIDTH = 80
-WRAP_DETECT_THRESHOLD = 0.3  # 30% of lines near wrap width → prose wrapping
+# Hard line-wrap detection: if many lines cluster near the same length,
+# the text is hard-wrapped prose and needs unwrapping.
+# lib.ru uses various widths: 64, 72, 75, 80 chars.
+WRAP_DETECT_THRESHOLD = 0.3  # 30% of lines near any wrap width → prose wrapping
 
 
 # ── HTML parsing ─────────────────────────────────────────────
@@ -154,15 +154,17 @@ def unwrap_prose(text: str) -> str:
     if len(lines) < 10:
         return text
 
-    # Detect hard wrapping: check if many lines end near WRAP_WIDTH
+    # Detect hard wrapping: check if many lines cluster near any common width
     content_lines = [l for l in lines if l.strip()]
     if not content_lines:
         return text
 
-    near_wrap = sum(
-        1 for l in content_lines
-        if WRAP_WIDTH - 5 <= len(l) <= WRAP_WIDTH + 5
-    )
+    lengths = [len(l) for l in content_lines]
+    # Check common wrap widths: 60-80
+    near_wrap = 0
+    for w in range(60, 85):
+        count = sum(1 for ln in lengths if w - 3 <= ln <= w + 3)
+        near_wrap = max(near_wrap, count)
     wrap_ratio = near_wrap / len(content_lines)
 
     if wrap_ratio < WRAP_DETECT_THRESHOLD:
@@ -173,6 +175,7 @@ def unwrap_prose(text: str) -> str:
     # Paragraph boundaries in lib.ru prose:
     #   1. Empty lines
     #   2. Lines starting with 5+ spaces (indented first line of paragraph)
+    #   3. Short lines followed by indented lines (end of paragraph)
     paragraphs = []
     current = []
 
@@ -194,7 +197,10 @@ def unwrap_prose(text: str) -> str:
     if current:
         paragraphs.append(" ".join(current))
 
-    return "\n".join(paragraphs)
+    # Collapse multiple spaces left by hard-wrap alignment
+    result = "\n".join(paragraphs)
+    result = re.sub(r"  +", " ", result)
+    return result
 
 
 # ── Matching ─────────────────────────────────────────────────
