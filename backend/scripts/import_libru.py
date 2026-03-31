@@ -110,14 +110,8 @@ def parse_libru_file(path: Path) -> dict | None:
     body = re.sub(r"</?[a-zA-Z][^>]*>", "", body)
 
     # Decode HTML entities
-    body = body.replace("&nbsp;", " ")
-    body = body.replace("&amp;", "&")
-    body = body.replace("&lt;", "<")
-    body = body.replace("&gt;", ">")
-    body = body.replace("&quot;", '"')
-    body = body.replace("&laquo;", "«")
-    body = body.replace("&raquo;", "»")
-    body = body.replace("&#160;", " ")
+    import html as html_mod
+    body = html_mod.unescape(body)
 
     # Remove footnote markers
     body = re.sub(r"\(\d+\)", "", body)
@@ -190,6 +184,7 @@ def unwrap_prose(text: str) -> str:
         elif line.startswith("     ") and current:
             # Indented line with existing paragraph = new paragraph
             paragraphs.append(" ".join(current))
+            paragraphs.append("")  # empty line between paragraphs
             current = [stripped]
         else:
             current.append(stripped)
