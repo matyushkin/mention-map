@@ -95,12 +95,16 @@ def parse_libru_file(path: Path) -> dict | None:
     if len(hr_parts) > 1:
         body = "<hr>".join(hr_parts[1:])  # keep everything after first <hr>
 
-    # Remove HTML tags
-    body = re.sub(r"<ul>.*?</ul>", "\n", body, flags=re.DOTALL)
-    body = re.sub(r"<h[1-6][^>]*>(.*?)</h[1-6]>", r"\n\1\n", body, flags=re.DOTALL | re.IGNORECASE)
+    # Preserve paragraph structure: <ul>, <h*>, <p> → double newlines
+    body = re.sub(r"<ul[^>]*>", "\n\n", body, flags=re.IGNORECASE)
+    body = re.sub(r"</ul>", "\n\n", body, flags=re.IGNORECASE)
+    body = re.sub(r"<h[1-6][^>]*>(.*?)</h[1-6]>", r"\n\n\1\n\n", body, flags=re.DOTALL | re.IGNORECASE)
+    body = re.sub(r"<p[^>]*>", "\n\n", body, flags=re.IGNORECASE)
+    body = re.sub(r"</p>", "\n\n", body, flags=re.IGNORECASE)
+    body = re.sub(r"<br\s*/?>", "\n", body, flags=re.IGNORECASE)
+    # Remove remaining tags
     body = re.sub(r"<a[^>]*>", "", body)
     body = re.sub(r"</a>", "", body)
-    body = re.sub(r"<br\s*/?>", "\n", body, flags=re.IGNORECASE)
     body = re.sub(r"</?pre[^>]*>", "", body, flags=re.IGNORECASE)
     body = re.sub(r"</?font[^>]*>", "", body, flags=re.IGNORECASE)
     body = re.sub(r"</?[a-zA-Z][^>]*>", "", body)
@@ -165,19 +169,26 @@ def unwrap_prose(text: str) -> str:
         # Not hard-wrapped (poetry, or short text) — keep as is
         return text
 
-    # Rejoin lines within paragraphs
+    # Rejoin hard-wrapped lines within paragraphs.
+    # Paragraph boundaries in lib.ru prose:
+    #   1. Empty lines
+    #   2. Lines starting with 5+ spaces (indented first line of paragraph)
     paragraphs = []
     current = []
 
     for line in lines:
         stripped = line.strip()
         if not stripped:
+            # Empty line = paragraph boundary
             if current:
                 paragraphs.append(" ".join(current))
                 current = []
-            paragraphs.append("")  # preserve paragraph break
+            paragraphs.append("")
+        elif line.startswith("     ") and current:
+            # Indented line with existing paragraph = new paragraph
+            paragraphs.append(" ".join(current))
+            current = [stripped]
         else:
-            # Remove leading spaces (indentation from hard-wrap formatting)
             current.append(stripped)
 
     if current:
