@@ -1,12 +1,21 @@
-"""Import texts from a local lib.ru (Moshkov) archive into the dataset.
+"""Import texts from local lib.ru archives into the dataset.
 
-Parses .txt.html files, extracts author+title from <title> tags,
-cleans HTML, unwraps hard-wrapped prose lines, and matches to
-the existing Wikisource-based catalogue.
+Supports two archive formats:
+  1. lib.ru classic (2009): book/{AUTHOR}/*.txt.html
+  2. az.lib.ru / lit.lib.ru: {letter}/{author_name}/text_NNNN.shtml.htm
+
+Parses author+title from <title> tags, cleans HTML, unwraps
+hard-wrapped prose lines, and matches to the existing catalogue.
 
 Usage:
+    # Classic lib.ru archive
     uv run --extra hf python scripts/import_libru.py \
         --libru-dir /Users/leo/Downloads/lib.ru.28.03.09/book \
+        --dataset-dir ../hf_dataset
+
+    # az.lib.ru / lit.lib.ru archives
+    uv run --extra hf python scripts/import_libru.py \
+        --az-lib-dir '/Users/leo/Downloads/(Библиотеки) Lib.ru+company' \
         --dataset-dir ../hf_dataset
 """
 
@@ -335,12 +344,219 @@ def import_libru(libru_dir: Path, dataset_dir: Path):
                      len(records), out_path.name, out_path.stat().st_size / 1e6)
 
 
+# ── az.lib.ru / lit.lib.ru parser ────────────────────────────
+
+def parse_azlib_file(path: Path) -> dict | None:
+    """Parse an az.lib.ru text_NNNN.shtml.htm file."""
+    try:
+        raw = path.read_bytes()
+    except OSError:
+        return None
+
+    # Detect encoding (usually cp1251)
+    text = None
+    for enc in ("cp1251", "utf-8", "koi8-r"):
+        try:
+            text = raw.decode(enc)
+            if re.search(r"[а-яА-ЯёЁ]{3,}", text):
+                break
+            text = None
+        except (UnicodeDecodeError, ValueError):
+            continue
+    if not text:
+        return None
+
+    # Extract title: "Lib.ru/Классика: Фамилия Имя Отчество. Название"
+    title_match = re.search(r"<title>([^<]+)</title>", text, re.IGNORECASE)
+    if not title_match:
+        return None
+
+    raw_title = title_match.group(1).strip()
+    # Remove "Lib.ru/Классика: " or similar prefix
+    raw_title = re.sub(r"^Lib\.ru/[^:]+:\s*", "", raw_title)
+
+    # Parse "Фамилия Имя Отчество. Название"
+    author, title = "", raw_title
+    dot_match = re.match(r"^(.+?)\.\s+(.+)$", raw_title)
+    if dot_match:
+        candidate_author = dot_match.group(1).strip()
+        candidate_title = dot_match.group(2).strip()
+        if re.search(r"[А-ЯЁ]", candidate_author) and len(candidate_author) < 80:
+            author = candidate_author
+            title = candidate_title
+
+    if not author:
+        return None
+
+    # Extract body: text lives between first </table> and second </table>
+    body = text
+    table_ends = [m.end() for m in re.finditer(r"</table>", body, re.IGNORECASE)]
+    if len(table_ends) >= 2:
+        body = body[table_ends[0]:table_ends[-2]]
+    elif len(table_ends) == 1:
+        body = body[table_ends[0]:]
+
+    # Remove trailing navigation/footer
+    for marker in ["<!--- Блок ссылок", "<!-- Yandex", "</body>",
+                    "<!-- LiveInternet", "Связаться с программистом"]:
+        idx = body.find(marker)
+        if idx > 0:
+            body = body[:idx]
+
+    # Convert <br> to newlines, <dd> to paragraph marks
+    body = re.sub(r"<br\s*/?>", "\n", body, flags=re.IGNORECASE)
+    body = re.sub(r"<dd>", "\n\n", body, flags=re.IGNORECASE)
+    body = re.sub(r"<p[^>]*>", "\n\n", body, flags=re.IGNORECASE)
+
+    # Remove HTML tags
+    body = re.sub(r"<[^>]+>", "", body)
+
+    # Decode entities
+    import html as html_mod
+    body = html_mod.unescape(body)
+
+    # Remove OCR/source metadata block (between --- lines)
+    body = re.sub(
+        r"-{10,}.*?-{10,}", "\n", body, flags=re.DOTALL, count=1,
+    )
+
+    # Trim whitespace
+    body = re.sub(r"[ \t]+", " ", body)
+    body = re.sub(r"\n{3,}", "\n\n", body)
+    body = body.strip()
+
+    if len(body) < 100:
+        return None
+
+    # Unwrap hard-wrapped prose
+    body = unwrap_prose(body)
+
+    return {
+        "author": author,
+        "title": title,
+        "text": body,
+        "file": str(path),
+    }
+
+
+def scan_azlib(base_dir: Path) -> list[dict]:
+    """Scan az.lib.ru / lit.lib.ru directory for text files."""
+    parsed = []
+    subdomains = ["az.lib.ru", "lit.lib.ru", "det.lib.ru"]
+
+    for subdomain in subdomains:
+        sd_path = base_dir / subdomain
+        if not sd_path.exists():
+            continue
+
+        files = list(sd_path.rglob("text_*.htm"))
+        logger.info("%s: found %d text files", subdomain, len(files))
+
+        for f in files:
+            result = parse_azlib_file(f)
+            if result and result["author"]:
+                result["source_domain"] = subdomain
+                parsed.append(result)
+
+    logger.info("Total parsed from az/lit.lib.ru: %d", len(parsed))
+    return parsed
+
+
+def import_azlib(base_dir: Path, dataset_dir: Path):
+    """Import texts from az.lib.ru / lit.lib.ru archives."""
+    parsed = scan_azlib(base_dir)
+    if not parsed:
+        logger.error("No texts parsed from %s", base_dir)
+        return
+
+    # Build index and match
+    logger.info("Building works index...")
+    works_index = build_works_index(dataset_dir)
+    logger.info("Works index: %d entries", len(works_index))
+
+    matched = 0
+    improved = 0
+    new_texts = []
+
+    for p in parsed:
+        norm_author = normalize_for_match(p["author"])
+        norm_title = normalize_for_match(p["title"])
+        key = f"{norm_author}||{norm_title}"
+
+        if key in works_index:
+            matched += 1
+            existing = works_index[key]
+            if len(p["text"]) > existing["text_length"] * 1.2:
+                improved += 1
+        else:
+            new_texts.append(p)
+
+    logger.info("Matched to existing: %d", matched)
+    logger.info("Could improve (>20%% longer): %d", improved)
+    logger.info("New texts not in dataset: %d", len(new_texts))
+
+    if new_texts:
+        logger.info("Sample new texts:")
+        for p in new_texts[:20]:
+            logger.info("  %s — %s (%d chars)", p["author"], p["title"], len(p["text"]))
+
+    # Save
+    if new_texts:
+        import sys
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        from build_hf_from_dump import WORK_SCHEMA
+        records = []
+        for p in new_texts:
+            domain = p.get("source_domain", "azlib")
+            records.append({
+                "id": f"azlib:{Path(p['file']).stem}",
+                "title": p["title"],
+                "author": p["author"],
+                "author_id": "",
+                "author_birth_year": None,
+                "author_death_year": None,
+                "year_written": None,
+                "year_published": None,
+                "genre": "other",
+                "text": p["text"],
+                "text_length": len(p["text"]),
+                "word_count": len(p["text"].split()),
+                "source": p["file"],
+                "categories": [],
+                "interwiki": [],
+                "quality": "",
+                "license": "unverified",
+                "license_reason": f"{domain}_no_metadata",
+                "wikisource_page": "",
+            })
+
+        table = pa.table(
+            {f.name: [r.get(f.name) for r in records] for f in WORK_SCHEMA},
+            schema=WORK_SCHEMA,
+        )
+        out_path = dataset_dir / "azlib-new.parquet"
+        pq.write_table(table, out_path, compression="zstd")
+        logger.info("Saved %d new texts → %s (%.1f MB)",
+                     len(records), out_path.name, out_path.stat().st_size / 1e6)
+
+
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--libru-dir", type=Path, required=True)
+    parser.add_argument("--libru-dir", type=Path, default=None,
+                        help="Path to classic lib.ru archive (book/ directory)")
+    parser.add_argument("--az-lib-dir", type=Path, default=None,
+                        help="Path to az.lib.ru+company archive")
     parser.add_argument("--dataset-dir", type=Path, required=True)
     args = parser.parse_args()
-    import_libru(args.libru_dir, args.dataset_dir)
+
+    if not args.libru_dir and not args.az_lib_dir:
+        parser.error("Specify --libru-dir and/or --az-lib-dir")
+
+    if args.libru_dir:
+        import_libru(args.libru_dir, args.dataset_dir)
+
+    if args.az_lib_dir:
+        import_azlib(args.az_lib_dir, args.dataset_dir)
 
 
 if __name__ == "__main__":
