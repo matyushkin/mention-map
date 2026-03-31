@@ -51,11 +51,15 @@ class WikisourceText:
 class WikisourceClient:
     """Client for fetching texts from ru.wikisource.org."""
 
-    def __init__(self, delay: float = REQUEST_DELAY):
+    def __init__(self, delay: float = REQUEST_DELAY, maxlag: int = 5):
         self.delay = delay
+        self.maxlag = maxlag
         self._last_request = 0.0
         self._client = httpx.Client(
-            headers={"User-Agent": USER_AGENT},
+            headers={
+                "User-Agent": USER_AGENT,
+                "Accept-Encoding": "gzip",
+            },
             timeout=30.0,
         )
 
@@ -77,9 +81,23 @@ class WikisourceClient:
     def _api_get(self, **params) -> dict:
         self._throttle()
         params.setdefault("format", "json")
-        resp = self._client.get(API_URL, params=params)
-        resp.raise_for_status()
-        return resp.json()
+        params.setdefault("maxlag", self.maxlag)
+        for attempt in range(5):
+            resp = self._client.get(API_URL, params=params)
+            # Respect maxlag: server asks us to retry later
+            if resp.status_code == 200:
+                data = resp.json()
+                if "error" in data and data["error"].get("code") == "maxlag":
+                    retry_after = int(resp.headers.get("Retry-After", 5))
+                    logger.warning(
+                        "Server lagged, waiting %ds (attempt %d/5)",
+                        retry_after, attempt + 1,
+                    )
+                    time.sleep(retry_after)
+                    continue
+                return data
+            resp.raise_for_status()
+        raise RuntimeError("maxlag retries exhausted")
 
     # ── Search ──────────────────────────────────────────────
 
@@ -275,20 +293,52 @@ def _strip_html(text: str) -> str:
     return re.sub(r"<[^>]+>", "", text)
 
 
+def _remove_tagged_blocks(html: str, tag: str, attr_pattern: str) -> str:
+    """Remove HTML blocks by tag and attribute pattern, handling nested tags."""
+    pattern = re.compile(
+        rf"<{tag}[^>]*{attr_pattern}[^>]*>", re.DOTALL
+    )
+    open_tag = re.compile(rf"<{tag}[\s>]", re.IGNORECASE)
+    close_tag = re.compile(rf"</{tag}\s*>", re.IGNORECASE)
+
+    result = html
+    while True:
+        match = pattern.search(result)
+        if not match:
+            break
+        start = match.start()
+        depth = 1
+        pos = match.end()
+        while depth > 0 and pos < len(result):
+            next_open = open_tag.search(result, pos)
+            next_close = close_tag.search(result, pos)
+            if next_close is None:
+                break
+            if next_open and next_open.start() < next_close.start():
+                depth += 1
+                pos = next_open.end()
+            else:
+                depth -= 1
+                pos = next_close.end()
+        result = result[:start] + result[pos:]
+    return result
+
+
 def _html_to_text(html: str) -> str:
     """Convert rendered Wikisource HTML to clean plain text."""
     # Remove script/style blocks
     text = re.sub(r"<(script|style)[^>]*>.*?</\1>", "", html, flags=re.DOTALL)
 
+    # FIRST: remove all ws-noexport blocks (license, headers, nav)
+    # These contain nested tags, so use balanced-tag removal
+    text = _remove_tagged_blocks(text, "table", r"\bws-noexport\b")
+    text = _remove_tagged_blocks(text, "div", r"\bws-noexport\b")
+    # Remove license containers
+    text = _remove_tagged_blocks(text, "div", r"\blicenseContainer\b")
+
     # Remove Wikisource header/navigation template (contains title, author, nav arrows)
     text = re.sub(r'<div\s+id="headertemplate">.*?</div>\s*(?:</div>\s*)*<div\s+class="mw-parser-output-content">', "", text, flags=re.DOTALL)
     text = re.sub(r'<div\s+id="headertemplate">.*?(?=<div\s+class="poem">|<div\s+class="mw-parser-output-content">|<p>)', "", text, flags=re.DOTALL)
-    # Remove ws-noexport blocks (may contain nested divs — remove greedily to next sibling)
-    text = re.sub(r'<div[^>]*\bws-noexport\b[^>]*>(?:(?!<div[^>]*\bws-noexport\b).)*?</div>\s*(?:</div>\s*)*', "", text, flags=re.DOTALL)
-    text = re.sub(r'<div[^>]*\bws-noexport\b[^>]*>.*?</div>', "", text, flags=re.DOTALL)
-    text = re.sub(r'<table[^>]*\bws-noexport\b[^>]*>.*?</table>', "", text, flags=re.DOTALL)
-    # Remove license containers
-    text = re.sub(r'<div[^>]*\blicenseContainer\b[^>]*>.*?</div>\s*(?:</div>\s*)*', "", text, flags=re.DOTALL)
     text = re.sub(r'<div[^>]*\bid="headertemplate"[^>]*>.*?</table>\s*</div>', "", text, flags=re.DOTALL)
     # Remove header notes (source info, dates)
     text = re.sub(r'<table[^>]*\bheader_notes\b[^>]*>.*?</table>', "", text, flags=re.DOTALL)
