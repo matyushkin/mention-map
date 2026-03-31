@@ -313,7 +313,7 @@ def import_libru(libru_dir: Path, dataset_dir: Path):
         records = []
         for p in new_texts:
             records.append({
-                "id": f"libru:{Path(p['file']).stem}",
+                "id": f"libru:{Path(p['file']).parent.name}/{Path(p['file']).stem}",
                 "title": p["title"],
                 "author": p["author"],
                 "author_id": "",
@@ -509,7 +509,7 @@ def import_azlib(base_dir: Path, dataset_dir: Path):
         for p in new_texts:
             domain = p.get("source_domain", "azlib")
             records.append({
-                "id": f"azlib:{Path(p['file']).stem}",
+                "id": f"azlib:{Path(p['file']).parent.name}/{Path(p['file']).stem}",
                 "title": p["title"],
                 "author": p["author"],
                 "author_id": "",
