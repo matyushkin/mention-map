@@ -280,9 +280,20 @@ def _html_to_text(html: str) -> str:
     # Remove script/style blocks
     text = re.sub(r"<(script|style)[^>]*>.*?</\1>", "", html, flags=re.DOTALL)
 
-    # Remove navigation/header elements
-    text = re.sub(r'<div[^>]*class="[^"]*ws-noexport[^"]*"[^>]*>.*?</div>', "", text, flags=re.DOTALL)
+    # Remove Wikisource header/navigation template (contains title, author, nav arrows)
+    text = re.sub(r'<div\s+id="headertemplate">.*?</div>\s*(?:</div>\s*)*<div\s+class="mw-parser-output-content">', "", text, flags=re.DOTALL)
+    text = re.sub(r'<div\s+id="headertemplate">.*?(?=<div\s+class="poem">|<div\s+class="mw-parser-output-content">|<p>)', "", text, flags=re.DOTALL)
+    # Remove any remaining ws-noexport blocks (nested divs — use non-greedy with balanced approach)
+    text = re.sub(r'<div[^>]*\bws-noexport\b[^>]*>.*?</div>', "", text, flags=re.DOTALL)
+    text = re.sub(r'<table[^>]*\bws-noexport\b[^>]*>.*?</table>', "", text, flags=re.DOTALL)
+    text = re.sub(r'<div[^>]*\bid="headertemplate"[^>]*>.*?</table>\s*</div>', "", text, flags=re.DOTALL)
+    # Remove header notes (source info, dates)
+    text = re.sub(r'<table[^>]*\bheader_notes\b[^>]*>.*?</table>', "", text, flags=re.DOTALL)
+    text = re.sub(r'<div[^>]*\bid="extra_nav"[^>]*>.*?</div>\s*</div>', "", text, flags=re.DOTALL)
+    # Remove navigation elements
     text = re.sub(r'<div[^>]*class="[^"]*mw-heading[^"]*"[^>]*>.*?</div>', "", text, flags=re.DOTALL)
+    # Remove category links at the bottom
+    text = re.sub(r'<div[^>]*class="[^"]*catlinks[^"]*"[^>]*>.*?</div>', "", text, flags=re.DOTALL)
 
     # Replace <br> and <p> with newlines
     text = re.sub(r"<br\s*/?>", "\n", text)

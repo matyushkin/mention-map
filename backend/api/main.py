@@ -3,6 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from api.schemas import AnalysisRequest, AnalysisResponse, GraphData
 from nlp.pipeline import MentionPipeline
+from sources.corpus import list_works, load_work
 from sources.wikisource import WikisourceClient
 
 app = FastAPI(
@@ -80,3 +81,55 @@ async def wikisource_analyze(page: str, language: str = "ru"):
     text = wikisource.get_page_text(page)
     result = pipeline.process(text, language=language)
     return result
+
+
+# ── Corpus endpoints ────────────────────────────────────────
+
+
+@app.get("/corpus")
+async def corpus_list():
+    """List all available works in the local corpus."""
+    return list_works()
+
+
+@app.get("/corpus/{slug}")
+async def corpus_work(slug: str):
+    """Get metadata and chapter list for a work."""
+    work = load_work(slug)
+    return {
+        "slug": work.slug,
+        "title": work.title,
+        "author": work.author,
+        "year": work.year,
+        "genre": work.genre,
+        "language": work.language,
+        "stats": work.stats,
+        "chapters": [
+            {"title": ch.title, "number": ch.number, "char_count": ch.char_count}
+            for ch in work.chapters
+        ],
+    }
+
+
+@app.get("/corpus/{slug}/text")
+async def corpus_text(slug: str, chapter: int | None = None):
+    """Get text of a work or a specific chapter."""
+    work = load_work(slug)
+    if chapter is not None:
+        for ch in work.chapters:
+            if ch.number == chapter:
+                return {"chapter": ch.title, "text": ch.text}
+        return {"error": f"Chapter {chapter} not found"}
+    return {"text": work.full_text, "length": work.total_chars}
+
+
+@app.post("/corpus/{slug}/analyze")
+async def corpus_analyze(slug: str, chapter: int | None = None):
+    """Run NLP mention pipeline on a corpus work."""
+    work = load_work(slug)
+    if chapter is not None:
+        for ch in work.chapters:
+            if ch.number == chapter:
+                return pipeline.process(ch.text, language=work.language)
+        return {"error": f"Chapter {chapter} not found"}
+    return pipeline.process(work.full_text, language=work.language)

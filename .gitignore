@@ -28,3 +28,6 @@ Thumbs.db
 
 # spaCy models
 *.whl
+
+# Corpus data (large JSON files — stored on HuggingFace Hub)
+data/*.json
