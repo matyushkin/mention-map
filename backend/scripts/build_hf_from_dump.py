@@ -76,6 +76,8 @@ WORK_SCHEMA = pa.schema([
     ("quality", pa.string()),
     ("license", pa.string()),
     ("license_reason", pa.string()),
+    ("is_translation", pa.bool_()),
+    ("translator", pa.string()),
     ("wikisource_page", pa.string()),
 ])
 
@@ -575,6 +577,14 @@ def process_dump(dump_path: Path, output_dir: Path, batch_size: int = 5000, lite
             "quality": detect_quality(categories),
             "license": license_val,
             "license_reason": license_reason,
+            "is_translation": any(
+                c.startswith("Переводы, выполненные") for c in filtered_cats
+            ) or "перевод" in (params.get("ДРУГОЕ", "") + clean_title).lower(),
+            "translator": next(
+                (c.removeprefix("Переводы, выполненные ").strip().rstrip("\u200e")
+                 for c in filtered_cats if c.startswith("Переводы, выполненные ")),
+                "",
+            ),
             "wikisource_page": title,
         }
 
