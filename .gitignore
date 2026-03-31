@@ -31,3 +31,6 @@ Thumbs.db
 
 # Corpus data (large JSON files — stored on HuggingFace Hub)
 data/*.json
+
+# HuggingFace dataset output
+hf_dataset/

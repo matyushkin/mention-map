@@ -20,6 +20,10 @@ dev = [
 stanza = [
     "stanza>=1.9",
 ]
+hf = [
+    "pyarrow>=18.0",
+    "datasets>=3.0",
+]
 
 [tool.pytest.ini_options]
 markers = [
