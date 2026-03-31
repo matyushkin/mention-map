@@ -146,24 +146,79 @@ def clean_wikitext(text: str) -> str:
         ("&lt;", "<"), ("&gt;", ">"),
     ]:
         text = text.replace(old, new)
+    # Remove leftover "Категория:..." lines (without brackets)
+    text = re.sub(r"^Категория:[^\n]+$", "", text, flags=re.MULTILINE)
+    # Remove __NOEDITSECTION__ and similar magic words
+    text = re.sub(r"__[A-Z]+__", "", text)
+    # Remove leftover section headers (== Title ==)
+    text = re.sub(r"^=+\s*[^=\n]+\s*=+\s*$", "", text, flags=re.MULTILINE)
     text = re.sub(r"[ \t]+", " ", text)
     text = re.sub(r"\n{3,}", "\n\n", text)
     return text.strip()
 
 
+def _unwrap_literary_templates(text: str) -> str:
+    """Convert literary templates to plain text BEFORE removing all templates.
+
+    Handles: {{f1|title|text|}}, {{poem|title|text}}, {{poem-on|title}},
+    {{лесенка|line1|line2|...}}, {{стих|text}}, etc.
+    """
+    # FIRST: unwrap inner templates that appear inside poem/f1 blocks
+    # {{лесенка|line1|line2|...}} → join lines with spaces
+    def _unwrap_lesenka(m: re.Match) -> str:
+        parts = m.group(1).split("|")
+        return " ".join(p.strip() for p in parts if p.strip())
+    text = re.sub(
+        r"\{\{[Лл]есенка\|(.*?)\}\}", _unwrap_lesenka, text,
+    )
+
+    # THEN: unwrap outer poem/f1 containers
+    # {{f1|Title|body text|}} → body text
+    text = re.sub(
+        r"\{\{f1\|[^|]*\|(.*?)\|\}\}", r"\1", text, flags=re.DOTALL,
+    )
+    # {{poem|Title|body text}} → body text
+    text = re.sub(
+        r"\{\{poem\|[^|]*\|(.*?)\}\}", r"\1", text, flags=re.DOTALL,
+    )
+    # {{poem-on|Title}} → remove
+    text = re.sub(r"\{\{poem-on\|([^}]*)\}\}", "", text)
+    # {{poem-off}} → remove
+    text = re.sub(r"\{\{poem-off\}\}", "", text)
+    # {{стих|text}} → text
+    text = re.sub(r"\{\{стих\|(.*?)\}\}", r"\1", text, flags=re.DOTALL)
+    # {{center|text}} → text
+    text = re.sub(r"\{\{center\|(.*?)\}\}", r"\1", text, flags=re.DOTALL)
+    # {{right|text}} → text
+    text = re.sub(r"\{\{right\|(.*?)\}\}", r"\1", text, flags=re.DOTALL)
+    # {{smaller|text}} → text
+    text = re.sub(r"\{\{smaller\|(.*?)\}\}", r"\1", text, flags=re.DOTALL)
+    # {{larger|text}} → text
+    text = re.sub(r"\{\{larger\|(.*?)\}\}", r"\1", text, flags=re.DOTALL)
+    # {{разрядка|text}} → text
+    text = re.sub(r"\{\{разрядка\|(.*?)\}\}", r"\1", text, flags=re.DOTALL)
+    # <poem>text</poem> → text
+    text = re.sub(r"<poem>(.*?)</poem>", r"\1", text, flags=re.DOTALL)
+    return text
+
+
 def extract_clean_body(wikitext: str) -> str:
+    # Remove header/metadata templates
     body = re.sub(
-        r"\{\{(?:Отексте|Об авторе|header|Header)[^{}]*(?:\{\{[^{}]*\}\}[^{}]*)*\}\}",
+        r"\{\{(?:Отексте|Обавторе|Об авторе|header|Header)[^{}]*(?:\{\{[^{}]*\}\}[^{}]*)*\}\}",
         "", wikitext, flags=re.DOTALL | re.IGNORECASE,
     )
     body = re.sub(
-        r"\{\{(?:PD|pd|ОД|Public domain|Лицензия|License|simple)[^{}]*\}\}",
+        r"\{\{(?:PD|pd|ОД|Public domain|Лицензия|License|simple|аудиостатья)[^{}]*\}\}",
         "", body, flags=re.IGNORECASE,
     )
+    # Remove notes/references sections
     body = re.sub(
         r"^==+\s*(Примечания|Комментарии|Источники|Ссылки|См\. также)\s*==+.*",
         "", body, flags=re.MULTILINE | re.DOTALL,
     )
+    # Unwrap literary templates BEFORE generic template removal
+    body = _unwrap_literary_templates(body)
     return clean_wikitext(body)
 
 
@@ -605,19 +660,35 @@ def enrich_wikidata(output_dir: Path):
     }
     """
 
-    logger.info("Running Wikidata SPARQL query...")
-    resp = httpx.get(
-        sparql_url,
-        params={"query": query, "format": "json"},
-        headers={
-            "User-Agent": "MentionMap/0.1 (https://github.com/matyushkin/mention-map)",
-            "Accept": "application/sparql-results+json",
-        },
-        timeout=120.0,
-    )
-    resp.raise_for_status()
-    results = resp.json().get("results", {}).get("bindings", [])
-    logger.info("Got %d Wikidata results", len(results))
+    # Fetch in pages to avoid truncated JSON responses
+    results = []
+    page_size = 5000
+    offset = 0
+    while True:
+        paged_query = query.rstrip() + f"\nLIMIT {page_size} OFFSET {offset}"
+        logger.info("Wikidata SPARQL: offset=%d ...", offset)
+        try:
+            resp = httpx.get(
+                sparql_url,
+                params={"query": paged_query, "format": "json"},
+                headers={
+                    "User-Agent": "MentionMap/0.1 (https://github.com/matyushkin/mention-map)",
+                    "Accept": "application/sparql-results+json",
+                },
+                timeout=120.0,
+            )
+            resp.raise_for_status()
+            batch = resp.json().get("results", {}).get("bindings", [])
+        except (httpx.HTTPStatusError, Exception) as e:
+            logger.warning("Wikidata query failed at offset %d: %s — using %d results so far", offset, e, len(results))
+            break
+        results.extend(batch)
+        logger.info("  got %d results (total: %d)", len(batch), len(results))
+        if len(batch) < page_size:
+            break
+        offset += page_size
+
+    logger.info("Wikidata: %d total results", len(results))
 
     # Build mapping: wikisource page title → wikidata info
     wd_map: dict[str, dict] = {}
