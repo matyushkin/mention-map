@@ -72,8 +72,6 @@ WORK_SCHEMA = pa.schema([
     ("word_count", pa.int32()),
     ("source", pa.string()),
     ("categories", pa.list_(pa.string())),
-    ("interwiki", pa.list_(pa.string())),
-    ("quality", pa.string()),
     ("license", pa.string()),
     ("license_reason", pa.string()),
     ("is_translation", pa.bool_()),
@@ -152,8 +150,8 @@ def clean_wikitext(text: str) -> str:
     text = re.sub(r"^Категория:[^\n]+$", "", text, flags=re.MULTILINE)
     # Remove __NOEDITSECTION__ and similar magic words
     text = re.sub(r"__[A-Z]+__", "", text)
-    # Remove leftover section headers (== Title ==)
-    text = re.sub(r"^=+\s*[^=\n]+\s*=+\s*$", "", text, flags=re.MULTILINE)
+    # Convert wiki section headers (== Title ==) to plain text, keeping the title
+    text = re.sub(r"^=+\s*([^=\n]+?)\s*=+\s*$", r"\1", text, flags=re.MULTILINE)
     text = re.sub(r"[ \t]+", " ", text)
     text = re.sub(r"\n{3,}", "\n\n", text)
     return text.strip()
@@ -572,9 +570,7 @@ def process_dump(dump_path: Path, output_dir: Path, batch_size: int = 5000, lite
             "text_length": len(body),
             "word_count": len(body.split()),
             "source": clean_wikitext(params.get("ИСТОЧНИК", "")),
-            "categories": filter_categories(categories),
-            "interwiki": extract_interwiki(wikitext),
-            "quality": detect_quality(categories),
+            "categories": (filtered_cats := filter_categories(categories)),
             "license": license_val,
             "license_reason": license_reason,
             "is_translation": any(
