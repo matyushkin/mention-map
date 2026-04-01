@@ -119,6 +119,8 @@ def search_titles(queries: list[tuple[str, str]], client: httpx.Client) -> dict[
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--output-dir", type=Path, required=True)
+    parser.add_argument("--limit", type=int, default=0, help="Max unique queries (0=all)")
+    parser.add_argument("--offset", type=int, default=0, help="Skip first N unique queries")
     args = parser.parse_args()
 
     out = args.output_dir
@@ -148,6 +150,13 @@ def main():
             unique_queries.append((base_title, w["author"]))
 
     logger.info("Unique (author, title) to look up: %d", len(unique_queries))
+
+    if args.offset:
+        unique_queries = unique_queries[args.offset:]
+        logger.info("After offset %d: %d remaining", args.offset, len(unique_queries))
+    if args.limit:
+        unique_queries = unique_queries[:args.limit]
+        logger.info("Limited to %d", args.limit)
 
     client = httpx.Client(
         headers={"User-Agent": "MentionMap/0.1 (https://github.com/matyushkin/mention-map)"},
