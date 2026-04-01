@@ -9,6 +9,10 @@ dependencies = [
     "spacy>=3.8",
     "pydantic>=2.0",
     "httpx>=0.28",
+    "corus>=0.10.0",
+    "datasets>=4.8.4",
+    "zstandard>=0.25.0",
+    "jsonlines>=4.0.0",
 ]
 
 [project.optional-dependencies]
