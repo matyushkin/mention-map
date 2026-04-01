@@ -1,7 +1,7 @@
-"""Enrich genre field using Wikipedia article lookup.
+"""Enrich genre field using Wikipedia batch API.
 
-For each work with genre='other', searches Russian Wikipedia for the work
-title + author, extracts genre from the article infobox or categories.
+For works with genre='other', searches Russian Wikipedia in batches
+of 50 titles, extracts genre from categories and article intro.
 
 Usage:
     uv run --extra hf python scripts/enrich_genres.py --output-dir ../hf_dataset
@@ -11,6 +11,7 @@ import argparse
 import logging
 import re
 import time
+from collections import Counter
 from pathlib import Path
 
 import httpx
@@ -21,19 +22,18 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 logger = logging.getLogger(__name__)
 
 GENRE_KEYWORDS = {
-    "poetry": ["поэма", "стихотворение", "стих", "элегия", "баллада", "ода",
-                "сонет", "песнь", "гимн", "эпиграмма", "послание", "poem"],
+    "poetry": ["поэма", "поэзия", "стихотворение", "стих", "элегия", "баллада", "ода",
+                "сонет", "песнь", "гимн", "эпиграмма", "послание", "poem", "поэт"],
     "prose": ["роман", "повесть", "рассказ", "новелла", "очерк", "сказка",
               "притча", "эссе", "записки", "воспоминания", "мемуары", "проза",
-              "novel", "story", "tale"],
+              "прозаик", "novel", "story", "tale"],
     "drama": ["пьеса", "комедия", "трагедия", "драма", "водевиль", "сцены",
-              "либретто", "сценка", "опера", "play"],
-    "fable": ["басня", "fable"],
+              "либретто", "сценка", "опера", "драматург", "play"],
+    "fable": ["басня", "баснописец", "fable"],
 }
 
 
 def classify_genre(text: str) -> str | None:
-    """Classify genre from Wikipedia text/categories."""
     text_lower = text.lower()
     for genre, keywords in GENRE_KEYWORDS.items():
         if any(kw in text_lower for kw in keywords):
@@ -41,90 +41,95 @@ def classify_genre(text: str) -> str | None:
     return None
 
 
-def lookup_wikipedia_genre(title: str, author: str, client: httpx.Client) -> str | None:
-    """Search Wikipedia for a work and extract genre."""
-    # Clean title for search
-    clean_title = re.sub(r"\s*\([^)]*\)\s*", " ", title).strip()
-    clean_author = re.sub(r"\s*\([^)]*\)\s*", " ", author).strip()
-
-    # Try search with title + author
-    query = f"{clean_title} {clean_author}"
+def batch_lookup_genres(titles: list[str], client: httpx.Client) -> dict[str, str]:
+    """Look up genres for up to 50 titles in one API call."""
+    results = {}
+    titles_str = "|".join(titles[:50])
 
     try:
         resp = client.get(
             "https://ru.wikipedia.org/w/api.php",
             params={
                 "action": "query",
-                "list": "search",
-                "srsearch": query,
-                "srlimit": 1,
-                "format": "json",
-            },
-        )
-        data = resp.json()
-        results = data.get("query", {}).get("search", [])
-        if not results:
-            return None
-
-        page_title = results[0]["title"]
-
-        # Get page categories + extract
-        resp2 = client.get(
-            "https://ru.wikipedia.org/w/api.php",
-            params={
-                "action": "query",
-                "titles": page_title,
+                "titles": titles_str,
                 "prop": "categories|extracts",
                 "clshow": "!hidden",
-                "cllimit": 20,
+                "cllimit": "max",
                 "exintro": True,
                 "explaintext": True,
                 "exsentences": 3,
                 "format": "json",
             },
         )
-        data2 = resp2.json()
-        pages = data2.get("query", {}).get("pages", {})
+        data = resp.json()
+        pages = data.get("query", {}).get("pages", {})
 
         for page in pages.values():
-            # Check categories
-            cats = " ".join(
-                c.get("title", "")
-                for c in page.get("categories", [])
-            )
+            page_title = page.get("title", "")
+            if page.get("missing") is not None:
+                continue
+
+            cats = " ".join(c.get("title", "") for c in page.get("categories", []))
             genre = classify_genre(cats)
+            if not genre:
+                extract = page.get("extract", "")
+                genre = classify_genre(extract)
+
             if genre:
-                return genre
+                results[page_title] = genre
 
-            # Check extract
-            extract = page.get("extract", "")
-            genre = classify_genre(extract)
-            if genre:
-                return genre
+    except Exception as e:
+        logger.debug("Batch error: %s", e)
 
-    except Exception:
-        pass
+    return results
 
-    return None
+
+def search_titles(queries: list[tuple[str, str]], client: httpx.Client) -> dict[str, str]:
+    """Search Wikipedia for (title, author) pairs, return title → Wikipedia page title mapping."""
+    mapping = {}
+
+    # Batch search: use opensearch API which supports one query at a time but is faster
+    for title, author in queries:
+        clean = re.sub(r"\s*\([^)]*\)\s*", " ", title).strip()
+        if len(clean) < 3:
+            continue
+
+        try:
+            resp = client.get(
+                "https://ru.wikipedia.org/w/api.php",
+                params={
+                    "action": "opensearch",
+                    "search": clean,
+                    "limit": 1,
+                    "format": "json",
+                },
+            )
+            data = resp.json()
+            if len(data) >= 2 and data[1]:
+                wiki_title = data[1][0]
+                mapping[f"{author}||{title}"] = wiki_title
+        except Exception:
+            pass
+
+        time.sleep(0.05)  # Light rate limit for opensearch
+
+    return mapping
 
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--output-dir", type=Path, required=True)
-    parser.add_argument("--limit", type=int, default=0,
-                        help="Max works to check (0=all)")
     args = parser.parse_args()
 
     out = args.output_dir
 
-    # Collect 'other' genre works
+    # Collect 'other' genre works, deduplicate by (author, base_title)
     other_works = []
     for f in sorted(out.glob("works-*.parquet")):
         t = pq.read_table(f, columns=["id", "title", "author", "genre"])
         for i in range(t.num_rows):
             if t.column("genre")[i].as_py() == "other":
                 other_works.append({
-                    "file": f,
                     "id": t.column("id")[i].as_py(),
                     "title": t.column("title")[i].as_py() or "",
                     "author": t.column("author")[i].as_py() or "",
@@ -132,57 +137,60 @@ def main():
 
     logger.info("Works with genre='other': %d", len(other_works))
 
-    if args.limit:
-        other_works = other_works[:args.limit]
-        logger.info("Limited to %d", args.limit)
-
-    # Deduplicate by (author, title) — many chapters share same work
+    # Deduplicate by (author, base_title)
     seen = {}
     unique_queries = []
     for w in other_works:
-        # Use parent title (before /)
         base_title = w["title"].split("/")[0].strip()
         key = (w["author"], base_title)
         if key not in seen:
             seen[key] = None
-            unique_queries.append((w["author"], base_title, key))
+            unique_queries.append((base_title, w["author"]))
 
     logger.info("Unique (author, title) to look up: %d", len(unique_queries))
 
-    # Lookup genres from Wikipedia
     client = httpx.Client(
         headers={"User-Agent": "MentionMap/0.1 (https://github.com/matyushkin/mention-map)"},
-        timeout=10.0,
+        timeout=15.0,
     )
 
-    checked = 0
-    found = 0
-    for author, title, key in unique_queries:
-        genre = lookup_wikipedia_genre(title, author, client)
-        if genre:
-            seen[key] = genre
-            found += 1
-        checked += 1
-        time.sleep(0.2)  # Respect Wikipedia rate limits
+    # Step 1: Search Wikipedia for page titles (opensearch, fast)
+    logger.info("Step 1: Searching Wikipedia for page titles...")
+    title_mapping = search_titles(unique_queries, client)
+    logger.info("Found %d Wikipedia pages", len(title_mapping))
 
-        if checked % 200 == 0:
-            logger.info("  checked %d/%d, found genres: %d",
-                        checked, len(unique_queries), found)
+    # Step 2: Batch lookup genres (50 titles per request)
+    wiki_titles = list(set(title_mapping.values()))
+    logger.info("Step 2: Batch genre lookup for %d Wikipedia pages...", len(wiki_titles))
+
+    genre_results = {}
+    for batch_start in range(0, len(wiki_titles), 50):
+        batch = wiki_titles[batch_start:batch_start + 50]
+        batch_genres = batch_lookup_genres(batch, client)
+        genre_results.update(batch_genres)
+        time.sleep(0.5)
+
+        if batch_start % 500 == 0 and batch_start > 0:
+            logger.info("  %d/%d batches, found %d genres",
+                        batch_start // 50, len(wiki_titles) // 50, len(genre_results))
 
     client.close()
-    logger.info("Wikipedia lookup done: %d checked, %d genres found", checked, found)
+    logger.info("Found genres for %d Wikipedia pages", len(genre_results))
 
-    # Apply to dataset
-    # Build full map: for each work, find genre by (author, base_title)
-    genre_map = {}
+    # Step 3: Map back to works
+    # key (author, base_title) → genre
+    work_genres = {}
     for w in other_works:
         base_title = w["title"].split("/")[0].strip()
-        key = (w["author"], base_title)
-        if seen.get(key):
-            genre_map[w["id"]] = seen[key]
+        key = f"{w['author']}||{base_title}"
+        if key in title_mapping:
+            wiki_title = title_mapping[key]
+            if wiki_title in genre_results:
+                work_genres[w["id"]] = genre_results[wiki_title]
 
-    logger.info("Works to reclassify: %d", len(genre_map))
+    logger.info("Works to reclassify: %d", len(work_genres))
 
+    # Step 4: Apply
     reclassified = 0
     for f in sorted(out.glob("works-*.parquet")):
         t = pq.read_table(f)
@@ -190,21 +198,18 @@ def main():
         ids = t.column("id").to_pylist()
         changed = False
         for i in range(t.num_rows):
-            if ids[i] in genre_map:
-                genres[i] = genre_map[ids[i]]
+            if ids[i] in work_genres:
+                genres[i] = work_genres[ids[i]]
                 reclassified += 1
                 changed = True
         if changed:
-            t = t.set_column(
-                t.schema.get_field_index("genre"), "genre",
-                pa.array(genres, type=pa.string()),
-            )
+            t = t.set_column(t.schema.get_field_index("genre"), "genre",
+                             pa.array(genres, type=pa.string()))
             pq.write_table(t, f, compression="zstd")
 
     logger.info("Reclassified: %d", reclassified)
 
-    # Final stats
-    from collections import Counter
+    # Stats
     final = Counter()
     for f in sorted(out.glob("works-*.parquet")):
         t = pq.read_table(f, columns=["genre"])
