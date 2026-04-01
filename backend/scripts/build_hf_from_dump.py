@@ -166,10 +166,10 @@ def _unwrap_literary_templates(text: str) -> str:
     {{лесенка|line1|line2|...}}, {{стих|text}}, etc.
     """
     # FIRST: unwrap inner templates that appear inside poem/f1 blocks
-    # {{лесенка|line1|line2|...}} → join lines with spaces
+    # {{лесенка|line1|line2|...}} → join with newlines (preserves Mayakovsky staircase)
     def _unwrap_lesenka(m: re.Match) -> str:
         parts = m.group(1).split("|")
-        return " ".join(p.strip() for p in parts if p.strip())
+        return "\n".join(p.strip() for p in parts if p.strip())
     text = re.sub(
         r"\{\{[Лл]есенка\|(.*?)\}\}", _unwrap_lesenka, text,
     )
