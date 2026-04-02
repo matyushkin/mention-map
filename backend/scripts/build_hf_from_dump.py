@@ -152,7 +152,8 @@ def clean_wikitext(text: str) -> str:
     text = re.sub(r"__[A-Z]+__", "", text)
     # Convert wiki section headers (== Title ==) to plain text, keeping the title
     text = re.sub(r"^=+\s*([^=\n]+?)\s*=+\s*$", r"\1", text, flags=re.MULTILINE)
-    text = re.sub(r"[ \t]+", " ", text)
+    # Collapse multiple spaces but preserve leading indentation (for лесенка)
+    text = re.sub(r"(?<=\S)[ \t]+", " ", text)
     text = re.sub(r"\n{3,}", "\n\n", text)
     return text.strip()
 
@@ -164,10 +165,16 @@ def _unwrap_literary_templates(text: str) -> str:
     {{лесенка|line1|line2|...}}, {{стих|text}}, etc.
     """
     # FIRST: unwrap inner templates that appear inside poem/f1 blocks
-    # {{лесенка|line1|line2|...}} → join with newlines (preserves Mayakovsky staircase)
+    # {{лесенка|part1|part2|part3}} → staircase where each part starts
+    # at the column where the previous part ended (cumulative offset)
     def _unwrap_lesenka(m: re.Match) -> str:
-        parts = m.group(1).split("|")
-        return "\n".join(p.strip() for p in parts if p.strip())
+        parts = [p.strip() for p in m.group(1).split("|") if p.strip()]
+        lines = []
+        offset = 0
+        for part in parts:
+            lines.append(" " * offset + part)
+            offset += len(part) + 1  # +1 for a space between words
+        return "\n".join(lines)
     text = re.sub(
         r"\{\{[Лл]есенка\|(.*?)\}\}", _unwrap_lesenka, text,
     )
@@ -199,6 +206,22 @@ def _unwrap_literary_templates(text: str) -> str:
     text = re.sub(r"\{\{разрядка\|(.*?)\}\}", r"\1", text, flags=re.DOTALL)
     # <poem>text</poem> → text
     text = re.sub(r"<poem>(.*?)</poem>", r"\1", text, flags=re.DOTALL)
+
+    # Drama templates
+    # {{Реплика|Лопахин}} text → Лопахин. text
+    # {{Реплика|Лопахин|ремарка}} text → Лопахин (ремарка). text
+    def _unwrap_replika(m: re.Match) -> str:
+        parts = m.group(1).split("|")
+        name = parts[0].strip()
+        if len(parts) > 1 and parts[1].strip():
+            return f"{name} ({parts[1].strip()})."
+        return f"{name}."
+    text = re.sub(r"\{\{[Рр]еплика\|([^}]+)\}\}", _unwrap_replika, text)
+    # {{ремарка|text}} → (text)
+    text = re.sub(r"\{\{ремарка\|([^}]+)\}\}", r"(\1)", text)
+    text = re.sub(r"\{\{rem\|([^}]+)\}\}", r"(\1)", text)
+    # {{razr|text}} → text (разрядка — просто выделение)
+    text = re.sub(r"\{\{razr\|([^}]+)\}\}", r"\1", text)
     return text
 
 
