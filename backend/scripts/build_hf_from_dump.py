@@ -207,9 +207,13 @@ def _unwrap_literary_templates(text: str) -> str:
     # <poem>text</poem> → text
     text = re.sub(r"<poem>(.*?)</poem>", r"\1", text, flags=re.DOTALL)
 
-    # Drama templates
-    # {{Реплика|Лопахин}} text → Лопахин. text
-    # {{Реплика|Лопахин|ремарка}} text → Лопахин (ремарка). text
+    # Drama templates — order matters: unwrap inner first, then outer
+
+    # {{razr|text}} → text (разрядка — просто выделение, must go first)
+    text = re.sub(r"\{\{razr\|([^}]+)\}\}", r"\1", text)
+
+    # {{Реплика|Name}} → Name.
+    # {{Реплика|Name|stage direction}} → Name (stage direction).
     def _unwrap_replika(m: re.Match) -> str:
         parts = m.group(1).split("|")
         name = parts[0].strip()
@@ -217,11 +221,13 @@ def _unwrap_literary_templates(text: str) -> str:
             return f"{name} ({parts[1].strip()})."
         return f"{name}."
     text = re.sub(r"\{\{[Рр]еплика\|([^}]+)\}\}", _unwrap_replika, text)
+
     # {{ремарка|text}} → (text)
     text = re.sub(r"\{\{ремарка\|([^}]+)\}\}", r"(\1)", text)
+    # {{rem|text with possible nested}} → (text)
+    # Handle nested templates that were already unwrapped
     text = re.sub(r"\{\{rem\|([^}]+)\}\}", r"(\1)", text)
-    # {{razr|text}} → text (разрядка — просто выделение)
-    text = re.sub(r"\{\{razr\|([^}]+)\}\}", r"\1", text)
+    text = re.sub(r"\{\{rem2\|([^}]+)\}\}", r"(\1)", text)
     return text
 
 
