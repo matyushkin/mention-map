@@ -1,10 +1,11 @@
-"""Build NER-style annotations for dramatic texts.
+"""Build tagged text and offset annotations for dramatic texts.
 
-Parses {{Реплика}}, {{ремарка}}, {{rem}} templates from Wikisource dump,
-generates character-offset annotations aligned with clean text in works parquet.
+Parses wiki templates ({{Реплика}}, {{ремарка}}, {{rem}}) from dump,
+generates text_tagged field with XML-like tags, then derives offset
+annotations from tag positions in the clean text.
 
-Output: annotations.parquet with columns:
-  work_id, start, end, type, value, speaker
+Adds `text_tagged` field to works parquet for drama texts.
+Creates annotations.parquet with character-offset spans.
 
 Usage:
     uv run --extra hf python scripts/build_annotations.py --output-dir ../hf_dataset
@@ -29,102 +30,71 @@ ANNOTATION_SCHEMA = pa.schema([
     ("work_id", pa.string()),
     ("start", pa.int32()),
     ("end", pa.int32()),
-    ("type", pa.string()),     # speaker, speech, stage_direction, scene_heading
-    ("value", pa.string()),    # character name for speaker, heading text for scene_heading
-    ("speaker", pa.string()),  # who is speaking (for speech spans)
+    ("type", pa.string()),
+    ("value", pa.string()),
+    ("speaker", pa.string()),
 ])
 
 
-def parse_drama_annotations(wikitext: str) -> tuple[str, list[dict]]:
-    """Parse wikitext with drama templates into clean text + annotations.
+def wikitext_to_tagged(wikitext: str) -> str | None:
+    """Convert drama wikitext to tagged text.
 
-    Returns (clean_text, annotations_list).
+    Returns None if text doesn't contain drama templates.
     """
+    if "{{Реплика" not in wikitext and "{{реплика" not in wikitext:
+        return None
+
     # Remove header templates
     wt = re.sub(
         r"\{\{(?:Отексте|Обавторе|Об авторе|header|Header)[^{}]*(?:\{\{[^{}]*\}\}[^{}]*)*\}\}",
         "", wikitext, flags=re.DOTALL | re.IGNORECASE,
     )
-    # Remove license/PD templates
     wt = re.sub(r"\{\{(?:PD|pd|ОД|Public domain|Лицензия|License|simple|аудиостатья)[^{}]*\}\}", "", wt, flags=re.IGNORECASE)
-    # Remove magic words
     wt = re.sub(r"__[A-Z]+__", "", wt)
-    # Remove notes section
     wt = re.sub(r"^==+\s*(Примечания|Комментарии|Источники|Ссылки)\s*==+.*", "", wt, flags=re.MULTILINE | re.DOTALL)
-    # Remove categories and interwiki
     wt = re.sub(r"\[\[(?:Категория|Category):[^\]]+\]\]", "", wt)
     wt = re.sub(r"\[\[[a-z]{2,3}:[^\]]+\]\]", "", wt)
 
-    annotations = []
     lines_out = []
-    pos = 0
 
     for line in wt.split("\n"):
         line = line.strip()
         if not line:
             lines_out.append("")
-            pos += 1
             continue
 
         # == Scene heading ==
         hm = re.match(r"^=+\s*(.+?)\s*=+$", line)
         if hm:
-            val = hm.group(1)
-            annotations.append({"start": pos, "end": pos + len(val), "type": "scene_heading", "value": val, "speaker": ""})
-            lines_out.append(val)
-            pos += len(val) + 1
+            lines_out.append(f'<scene>{hm.group(1)}</scene>')
             continue
 
-        # Unwrap razr (visual emphasis) before processing
+        # Unwrap razr first (visual emphasis → plain)
         line = re.sub(r"\{\{razr\|([^}]+)\}\}", r"\1", line)
 
         out = ""
         rest = line
 
         while rest:
-            # {{Реплика|Name}} or {{Реплика|Name|direction}}
+            # {{Реплика|Name}} or {{Реплика|Name|dir}}
             m = re.match(r"\{\{[Рр]еплика\|([^|}]+)(?:\|([^}]*))?\}\}\s*(.*)", rest, re.DOTALL)
             if m:
                 name = m.group(1).strip()
                 direction = (m.group(2) or "").strip()
                 speech = m.group(3)
 
-                # Build speaker text
                 if direction:
-                    speaker_str = f"{name} ({direction})."
+                    out += f'<speaker name="{name}" dir="{direction}"/>'
                 else:
-                    speaker_str = f"{name}."
+                    out += f'<speaker name="{name}"/>'
 
-                s_start = pos + len(out)
-                annotations.append({"start": s_start, "end": s_start + len(name), "type": "speaker", "value": name, "speaker": ""})
-                out += speaker_str + " "
+                # Process inline ремарки in speech
+                speech = re.sub(r"\{\{ремарка\|([^}]+)\}\}", r"<stage>\1</stage>", speech)
+                speech = re.sub(r"\{\{rem\|([^}]+)\}\}", r"<stage>\1</stage>", speech)
+                speech = re.sub(r"\{\{razr\|([^}]+)\}\}", r"\1", speech)
+                speech = re.sub(r"\{\{[^}]*\}\}", "", speech)
 
-                # Process inline ремарки in speech, recording their positions
-                processed_speech = ""
-                speech_rest = speech
-                while speech_rest:
-                    rm = re.search(r"\{\{ремарка\|([^}]+)\}\}", speech_rest)
-                    if not rm:
-                        rm = re.search(r"\{\{rem\|([^}]+)\}\}", speech_rest)
-                    if rm:
-                        # Text before ремарка
-                        processed_speech += speech_rest[:rm.start()]
-                        # Ремарка
-                        rem_text = f"({rm.group(1)})"
-                        rem_start = pos + len(out) + len(processed_speech)
-                        annotations.append({"start": rem_start, "end": rem_start + len(rem_text), "type": "stage_direction", "value": "", "speaker": ""})
-                        processed_speech += rem_text
-                        speech_rest = speech_rest[rm.end():]
-                    else:
-                        processed_speech += speech_rest
-                        speech_rest = ""
-
-                # Clean any remaining templates
-                processed_speech = re.sub(r"\{\{[^}]*\}\}", "", processed_speech)
-
-                sp_start = pos + len(out)
-                annotations.append({"start": sp_start, "end": sp_start + len(processed_speech), "type": "speech", "value": "", "speaker": name})
-                out += processed_speech
+                out += speech
                 rest = ""
                 continue
 
@@ -132,20 +102,14 @@ def parse_drama_annotations(wikitext: str) -> tuple[str, list[dict]]:
             m = re.match(r"\{\{rem2?\|(.+?)\}\}\s*(.*)", rest, re.DOTALL)
             if m:
                 content = re.sub(r"\{\{razr\|([^}]+)\}\}", r"\1", m.group(1))
-                rem_str = f"({content})"
-                r_start = pos + len(out)
-                annotations.append({"start": r_start, "end": r_start + len(rem_str), "type": "stage_direction", "value": "", "speaker": ""})
-                out += rem_str
+                out += f"<stage>{content}</stage>"
                 rest = m.group(2)
                 continue
 
             # {{ремарка|...}} standalone
             m = re.match(r"\{\{ремарка\|(.+?)\}\}\s*(.*)", rest, re.DOTALL)
             if m:
-                rem_str = f"({m.group(1)})"
-                r_start = pos + len(out)
-                annotations.append({"start": r_start, "end": r_start + len(rem_str), "type": "stage_direction", "value": "", "speaker": ""})
-                out += rem_str
+                out += f"<stage>{m.group(1)}</stage>"
                 rest = m.group(2)
                 continue
 
@@ -153,30 +117,96 @@ def parse_drama_annotations(wikitext: str) -> tuple[str, list[dict]]:
             out += rest
             rest = ""
 
-        # Clean leftover templates
-        out = re.sub(r"\{\{[^}]*\}\}", "", out).strip()
-        # Clean wiki links
+        # Clean leftover templates and wiki markup
+        out = re.sub(r"\{\{[^}]*\}\}", "", out)
         out = re.sub(r"\[\[[^|\]]+\|([^\]]+)\]\]", r"\1", out)
         out = re.sub(r"\[\[([^\]]+)\]\]", r"\1", out)
-        # Clean HTML
-        out = re.sub(r"<[^>]+>", "", out)
+        out = re.sub(r"<ref[^>]*>.*?</ref>", "", out, flags=re.DOTALL)
+        out = re.sub(r"<ref[^/]*/?>", "", out)
+        out = re.sub(r"</?(?!speaker|stage|scene)[a-zA-Z][^>]*>", "", out)
         out = re.sub(r"&nbsp;", " ", out)
+        out = re.sub(r"(?<=\S)[ \t]+", " ", out)  # preserve leading whitespace
+        out = out.rstrip()
 
         lines_out.append(out)
-        pos += len(out) + 1
 
-    text = "\n".join(lines_out).strip()
+    result = "\n".join(lines_out).strip()
+    result = re.sub(r"\n{3,}", "\n\n", result)
+    return result
 
-    # Remove leading empty lines
-    while text.startswith("\n"):
-        offset = 1
-        # Shift all annotations
-        for a in annotations:
-            a["start"] -= offset
-            a["end"] -= offset
-        text = text[offset:]
 
-    return text, annotations
+def strip_tags(tagged_text: str) -> str:
+    """Remove all tags from tagged text, producing clean text."""
+    text = re.sub(r"<speaker[^/]*/?>", "", tagged_text)
+    text = re.sub(r"</?(?:stage|scene)>", "", text)
+    return text
+
+
+def tagged_to_annotations(work_id: str, tagged_text: str) -> list[dict]:
+    """Extract offset annotations from tagged text.
+
+    Offsets reference positions in the CLEAN (untagged) text.
+    """
+    annotations = []
+    clean_pos = 0
+    tag_pos = 0
+    clean_text = strip_tags(tagged_text)
+
+    for m in re.finditer(r"<(speaker|stage|scene)([^>]*)>([^<]*)</\1>|<speaker([^/]*?)/>", tagged_text):
+        # Calculate clean text position for this match
+        # Everything before this match in tagged text
+        before_tagged = tagged_text[tag_pos:m.start()]
+        before_clean = strip_tags(before_tagged)
+        clean_pos_at_match = clean_pos + len(before_clean)
+
+        if m.group(4) is not None:
+            # Self-closing <speaker name="..." dir="..."/>
+            attrs = m.group(4)
+            name_m = re.search(r'name="([^"]+)"', attrs)
+            dir_m = re.search(r'dir="([^"]+)"', attrs)
+            if name_m:
+                annotations.append({
+                    "work_id": work_id,
+                    "start": clean_pos_at_match,
+                    "end": clean_pos_at_match,  # zero-width marker
+                    "type": "speaker",
+                    "value": name_m.group(1),
+                    "speaker": "",
+                })
+                if dir_m:
+                    annotations.append({
+                        "work_id": work_id,
+                        "start": clean_pos_at_match,
+                        "end": clean_pos_at_match,
+                        "type": "speaker_direction",
+                        "value": dir_m.group(1),
+                        "speaker": name_m.group(1),
+                    })
+        else:
+            tag_type = m.group(1)
+            content = m.group(3)
+            content_start = clean_pos_at_match
+            content_end = content_start + len(content)
+
+            ann_type = {
+                "stage": "stage_direction",
+                "scene": "scene_heading",
+            }.get(tag_type, tag_type)
+
+            annotations.append({
+                "work_id": work_id,
+                "start": content_start,
+                "end": content_end,
+                "type": ann_type,
+                "value": content if ann_type == "scene_heading" else "",
+                "speaker": "",
+            })
+
+        tag_pos = m.end()
+        clean_pos = clean_pos_at_match + len(strip_tags(m.group(0)))
+
+    annotations.sort(key=lambda a: (a["start"], a["end"]))
+    return annotations
 
 
 def main():
@@ -191,20 +221,17 @@ def main():
         logger.error("Dump not found: %s", dump)
         return
 
-    # Collect IDs of drama works
-    drama_ids = set()
+    # Collect all work IDs from dataset
+    all_ids = set()
     for f in sorted(out.glob("works-*.parquet")):
-        t = pq.read_table(f, columns=["id", "text"])
+        t = pq.read_table(f, columns=["id"])
         for i in range(t.num_rows):
-            wid = t.column("id")[i].as_py()
-            drama_ids.add(wid)
+            all_ids.add(t.column("id")[i].as_py())
 
-    logger.info("Works in dataset: %d", len(drama_ids))
+    logger.info("Works in dataset: %d", len(all_ids))
 
-    # Scan dump for pages with drama templates
-    all_annotations = []
-    pages_with_drama = 0
-
+    # Scan dump for drama pages
+    tagged_texts = {}  # work_id → tagged_text
     with bz2.open(str(dump), "rb") as f:
         try:
             for event, elem in ET.iterparse(f, events=("end",)):
@@ -213,54 +240,84 @@ def main():
                     ns_el = elem.find(f"{MW_NS}ns")
                     title = title_el.text if title_el is not None else ""
                     ns = ns_el.text if ns_el is not None else ""
-
-                    if ns != "0" or title not in drama_ids:
+                    if ns != "0" or title not in all_ids:
                         elem.clear()
                         continue
-
                     rev = elem.find(f"{MW_NS}revision")
                     text_el = rev.find(f"{MW_NS}text") if rev is not None else None
                     wt = text_el.text if text_el is not None else ""
-
-                    if wt and ("{{Реплика" in wt or "{{реплика" in wt):
-                        _, annots = parse_drama_annotations(wt)
-                        if annots:
-                            for a in annots:
-                                a["work_id"] = title
-                            all_annotations.extend(annots)
-                            pages_with_drama += 1
-
+                    if wt:
+                        tagged = wikitext_to_tagged(wt)
+                        if tagged:
+                            tagged_texts[title] = tagged
                     elem.clear()
         except ET.ParseError as e:
             logger.warning("XML parse error: %s", e)
 
-    logger.info("Drama pages found: %d, annotations: %d", pages_with_drama, len(all_annotations))
+    logger.info("Drama pages with tags: %d", len(tagged_texts))
 
-    if not all_annotations:
-        logger.warning("No annotations generated")
-        return
+    # Add text_tagged to works parquet
+    updated_works = 0
+    for f in sorted(out.glob("works-*.parquet")):
+        t = pq.read_table(f)
+        ids = t.column("id").to_pylist()
 
-    # Write annotations.parquet
-    table = pa.table(
-        {f.name: [a.get(f.name, "") for a in all_annotations] for f in ANNOTATION_SCHEMA},
-        schema=ANNOTATION_SCHEMA,
-    )
-    out_path = out / "annotations.parquet"
-    pq.write_table(table, out_path, compression="zstd")
-    logger.info("Written %d annotations → %s (%.1f MB)",
-                len(all_annotations), out_path.name, out_path.stat().st_size / 1e6)
+        # Check if any IDs match
+        has_tags = any(wid in tagged_texts for wid in ids)
+        if not has_tags:
+            # Still need to add empty text_tagged column if not present
+            if "text_tagged" not in t.column_names:
+                t = t.append_column("text_tagged", pa.array([""] * t.num_rows, type=pa.string()))
+                pq.write_table(t, f, compression="zstd")
+            continue
 
-    # Stats
-    from collections import Counter
-    types = Counter(a["type"] for a in all_annotations)
-    for t, c in types.most_common():
-        logger.info("  %s: %d", t, c)
+        tagged_col = []
+        for wid in ids:
+            tagged_col.append(tagged_texts.get(wid, ""))
+            if wid in tagged_texts:
+                updated_works += 1
 
-    speakers = Counter(a["value"] for a in all_annotations if a["type"] == "speaker")
-    logger.info("Unique speakers: %d", len(speakers))
-    logger.info("Top speakers:")
-    for s, c in speakers.most_common(10):
-        logger.info("  %4d  %s", c, s)
+        if "text_tagged" in t.column_names:
+            idx = t.schema.get_field_index("text_tagged")
+            t = t.set_column(idx, "text_tagged", pa.array(tagged_col, type=pa.string()))
+        else:
+            t = t.append_column("text_tagged", pa.array(tagged_col, type=pa.string()))
+
+        pq.write_table(t, f, compression="zstd")
+
+    logger.info("Works with text_tagged: %d", updated_works)
+
+    # Build annotations from tagged texts
+    all_annotations = []
+    for work_id, tagged in tagged_texts.items():
+        annots = tagged_to_annotations(work_id, tagged)
+        all_annotations.extend(annots)
+
+    logger.info("Total annotations: %d", len(all_annotations))
+
+    if all_annotations:
+        table = pa.table(
+            {f.name: [a[f.name] for a in all_annotations] for f in ANNOTATION_SCHEMA},
+            schema=ANNOTATION_SCHEMA,
+        )
+        out_path = out / "annotations.parquet"
+        pq.write_table(table, out_path, compression="zstd")
+        logger.info("Written → %s (%.1f MB)", out_path.name, out_path.stat().st_size / 1e6)
+
+        from collections import Counter
+        types = Counter(a["type"] for a in all_annotations)
+        for tp, c in types.most_common():
+            logger.info("  %s: %d", tp, c)
+        speakers = Counter(a["value"] for a in all_annotations if a["type"] == "speaker")
+        logger.info("Unique speakers: %d", len(speakers))
+        for s, c in speakers.most_common(10):
+            logger.info("  %4d  %s", c, s)
+
+    # Verify: spot-check one play
+    if "Вишнёвый сад (Чехов)/Действие первое" in tagged_texts:
+        tagged = tagged_texts["Вишнёвый сад (Чехов)/Действие первое"]
+        logger.info("\n=== Sample tagged text (Вишнёвый сад) ===")
+        logger.info(tagged[:600])
 
 
 if __name__ == "__main__":
