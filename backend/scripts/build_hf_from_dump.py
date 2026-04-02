@@ -498,9 +498,50 @@ class BatchParquetWriter:
 
 # ── Main processing ──────────────────────────────────────────
 
+def _auto_backup_overlays(output_dir: Path):
+    """Auto-save enrichments before rebuilding to prevent data loss."""
+    overlays = output_dir / "overlays"
+    overlays.mkdir(exist_ok=True)
+    existing_works = sorted(output_dir.glob("works-*.parquet"))
+    if not existing_works:
+        return
+    logger.info("Auto-backing up enrichments before rebuild...")
+    ids, licenses, reasons, genres, sources, years = [], [], [], [], [], []
+    for f in existing_works:
+        t = pq.read_table(f, columns=["id", "license", "license_reason", "genre", "source", "year_written"])
+        for i in range(t.num_rows):
+            ids.append(t.column("id")[i].as_py())
+            licenses.append(t.column("license")[i].as_py() or "")
+            reasons.append(t.column("license_reason")[i].as_py() or "")
+            genres.append(t.column("genre")[i].as_py() or "")
+            sources.append(t.column("source")[i].as_py() or "")
+            years.append(t.column("year_written")[i].as_py())
+    table = pa.table({
+        "id": pa.array(ids, type=pa.string()),
+        "license": pa.array(licenses, type=pa.string()),
+        "license_reason": pa.array(reasons, type=pa.string()),
+        "genre": pa.array(genres, type=pa.string()),
+        "source": pa.array(sources, type=pa.string()),
+        "year_written": pa.array(years, type=pa.int16()),
+    })
+    pq.write_table(table, overlays / "enrichments.parquet", compression="zstd")
+    # Backup authors
+    authors_path = output_dir / "authors.parquet"
+    if authors_path.exists():
+        import shutil
+        shutil.copy(authors_path, overlays / "authors_enriched.parquet")
+    # Backup annotations
+    ann_path = output_dir / "annotations.parquet"
+    if ann_path.exists():
+        import shutil
+        shutil.copy(ann_path, overlays / "annotations.parquet")
+    logger.info("Enrichments backed up to %s (%d records)", overlays, len(ids))
+
+
 def process_dump(dump_path: Path, output_dir: Path, batch_size: int = 5000, literary_only: bool = True):
     """Single-pass: extract both authors and works from the dump."""
     output_dir.mkdir(parents=True, exist_ok=True)
+    _auto_backup_overlays(output_dir)
 
     authors_writer = BatchParquetWriter(output_dir, "authors", AUTHOR_SCHEMA, batch_size=2000)
     works_writer = BatchParquetWriter(output_dir, "works", WORK_SCHEMA, batch_size=batch_size)
