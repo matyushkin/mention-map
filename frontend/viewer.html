@@ -1,0 +1,283 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<title>Корпус русской литературы — Просмотрщик</title>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { font-family: Georgia, serif; background: #f5f5f0; color: #333; }
+header { background: #8b0000; color: white; padding: 15px 20px; display: flex; justify-content: space-between; align-items: center; position: sticky; top: 0; z-index: 100; }
+header h1 { font-size: 1.2em; }
+.controls { display: flex; gap: 10px; align-items: center; }
+.controls button { padding: 8px 16px; border: none; border-radius: 4px; cursor: pointer; font-size: 0.9em; font-family: inherit; }
+.btn-random { background: #fff; color: #8b0000; font-weight: bold; }
+.btn-approve { background: #4caf50; color: white; }
+.btn-comment { background: #ff9800; color: white; }
+.toggle-tags { background: #2196f3; color: white; }
+.toggle-tags.off { background: #90a4ae; }
+
+.main { max-width: 1000px; margin: 20px auto; padding: 0 20px; }
+
+.meta { background: white; border-radius: 8px; padding: 15px 20px; margin-bottom: 15px; border: 1px solid #ddd; }
+.meta-title { font-size: 1.4em; color: #8b0000; font-weight: bold; }
+.meta-author { color: #555; font-style: italic; margin: 5px 0; }
+.meta-info { color: #888; font-size: 0.85em; display: flex; flex-wrap: wrap; gap: 15px; margin-top: 8px; }
+.meta-info span { display: inline-block; }
+.badge { padding: 2px 8px; border-radius: 10px; font-size: 0.8em; font-weight: bold; }
+.badge-prose { background: #e8f5e9; color: #2e7d32; }
+.badge-poetry { background: #e3f2fd; color: #1565c0; }
+.badge-drama { background: #fce4ec; color: #c62828; }
+.badge-other { background: #f5f5f5; color: #616161; }
+.badge-fable { background: #fff3e0; color: #e65100; }
+.badge-verified { background: #c8e6c9; color: #1b5e20; }
+
+.text-container { background: white; border-radius: 8px; padding: 20px; border: 1px solid #ddd; margin-bottom: 15px; }
+.text-content { white-space: pre-wrap; line-height: 1.7; font-size: 0.95em; max-height: 70vh; overflow-y: auto; padding: 10px; }
+
+/* NER tag highlighting */
+.tag-speaker { background: #bbdefb; border-bottom: 2px solid #1565c0; padding: 1px 3px; border-radius: 3px; }
+.tag-stage { background: #f8bbd0; border-bottom: 2px solid #c62828; padding: 1px 3px; border-radius: 3px; font-style: italic; }
+.tag-scene { background: #fff9c4; border-bottom: 2px solid #f9a825; padding: 2px 5px; border-radius: 3px; font-weight: bold; display: inline-block; margin: 5px 0; }
+.tag-speaker-name { background: #1565c0; color: white; padding: 1px 6px; border-radius: 3px; font-weight: bold; font-size: 0.9em; }
+.tag-speaker-dir { background: #7986cb; color: white; padding: 1px 4px; border-radius: 3px; font-size: 0.85em; }
+.tag-label { font-size: 0.65em; vertical-align: super; color: #666; margin-left: 2px; }
+
+/* Comment form */
+.comment-panel { background: white; border-radius: 8px; padding: 15px 20px; border: 1px solid #ff9800; margin-bottom: 15px; display: none; }
+.comment-panel.visible { display: block; }
+.comment-panel textarea { width: 100%; height: 80px; padding: 10px; font-family: inherit; font-size: 0.9em; border: 1px solid #ddd; border-radius: 4px; resize: vertical; }
+.comment-panel .comment-actions { margin-top: 10px; display: flex; gap: 10px; }
+.comment-panel button { padding: 6px 14px; border: none; border-radius: 4px; cursor: pointer; }
+.comment-save { background: #ff9800; color: white; }
+.comment-cancel { background: #eee; color: #333; }
+
+/* Status bar */
+.status { background: white; border-radius: 8px; padding: 10px 20px; border: 1px solid #ddd; margin-bottom: 15px; font-size: 0.85em; color: #666; }
+.status .verified-list { margin-top: 8px; max-height: 100px; overflow-y: auto; }
+.status .verified-item { padding: 2px 0; border-bottom: 1px solid #f0f0f0; }
+.comment-item { padding: 4px 0; border-bottom: 1px solid #fff3e0; background: #fff8e1; padding: 5px; margin: 3px 0; border-radius: 4px; font-size: 0.85em; }
+
+/* Legend */
+.legend { display: flex; gap: 15px; margin-bottom: 15px; flex-wrap: wrap; font-size: 0.85em; }
+.legend-item { display: flex; align-items: center; gap: 5px; }
+.legend-swatch { width: 20px; height: 14px; border-radius: 3px; display: inline-block; }
+
+.loading { text-align: center; padding: 40px; color: #999; font-size: 1.2em; }
+
+#fileInput { display: none; }
+.load-btn { background: #fff; color: #8b0000; padding: 8px 16px; border: none; border-radius: 4px; cursor: pointer; font-family: inherit; font-size: 0.9em; font-weight: bold; }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>📚 Корпус русской литературы</h1>
+  <div class="controls">
+    <button class="btn-random" onclick="loadRandom()">Случайная запись</button>
+    <button class="toggle-tags" id="toggleBtn" onclick="toggleTags()">Разметка: ВКЛ</button>
+    <button class="btn-approve" onclick="approveRecord()">✓ Проверено</button>
+    <button class="btn-comment" onclick="toggleComment()">✎ Комментарий</button>
+    <label class="load-btn">📂 Загрузить JSON
+      <input type="file" id="fileInput" accept=".json" onchange="loadFile(event)">
+    </label>
+    <button class="load-btn" onclick="exportData()">💾 Экспорт</button>
+  </div>
+</header>
+
+<div class="main">
+  <div class="legend" id="legend" style="display:none">
+    <div class="legend-item"><span class="legend-swatch" style="background:#bbdefb;border-bottom:2px solid #1565c0"></span> Реплика</div>
+    <div class="legend-item"><span class="legend-swatch" style="background:#1565c0"></span> Говорящий</div>
+    <div class="legend-item"><span class="legend-swatch" style="background:#f8bbd0;border-bottom:2px solid #c62828"></span> Ремарка</div>
+    <div class="legend-item"><span class="legend-swatch" style="background:#fff9c4;border-bottom:2px solid #f9a825"></span> Сцена</div>
+  </div>
+
+  <div class="meta" id="meta" style="display:none">
+    <div class="meta-title" id="title"></div>
+    <div class="meta-author" id="author"></div>
+    <div class="meta-info" id="info"></div>
+  </div>
+
+  <div class="comment-panel" id="commentPanel">
+    <strong>Комментарий к записи:</strong>
+    <textarea id="commentText" placeholder="Опишите проблему: некорректное форматирование, потерянный текст, неправильный жанр и т.п."></textarea>
+    <div class="comment-actions">
+      <button class="comment-save" onclick="saveComment()">Сохранить</button>
+      <button class="comment-cancel" onclick="toggleComment()">Отмена</button>
+    </div>
+  </div>
+
+  <div class="text-container" id="textContainer" style="display:none">
+    <div class="text-content" id="textContent"></div>
+  </div>
+
+  <div class="status" id="statusPanel">
+    <strong>Статус проверки:</strong> <span id="statusCount">0 проверено, 0 комментариев</span>
+    <div class="verified-list" id="reviewLog"></div>
+  </div>
+
+  <div class="loading" id="loading">
+    Загрузите JSON-файл с данными корпуса<br>
+    <small>Сгенерируйте его командой: <code>uv run --extra hf python scripts/export_viewer_data.py</code></small>
+  </div>
+</div>
+
+<script>
+let dataset = [];
+let currentIndex = -1;
+let tagsVisible = true;
+let reviews = JSON.parse(localStorage.getItem('corpus_reviews') || '{}');
+let comments = JSON.parse(localStorage.getItem('corpus_comments') || '{}');
+
+function loadFile(event) {
+  const file = event.target.files[0];
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = function(e) {
+    try {
+      dataset = JSON.parse(e.target.result);
+      document.getElementById('loading').style.display = 'none';
+      updateStatus();
+      loadRandom();
+    } catch(err) {
+      alert('Ошибка загрузки: ' + err.message);
+    }
+  };
+  reader.readAsText(file);
+}
+
+function loadRandom() {
+  if (!dataset.length) return;
+  currentIndex = Math.floor(Math.random() * dataset.length);
+  renderRecord(dataset[currentIndex]);
+}
+
+function renderRecord(rec) {
+  document.getElementById('meta').style.display = 'block';
+  document.getElementById('textContainer').style.display = 'block';
+  document.getElementById('legend').style.display = tagsVisible && rec.text_tagged ? 'flex' : 'none';
+
+  document.getElementById('title').textContent = rec.title || rec.id;
+  document.getElementById('author').textContent = rec.author + (rec.year_written ? ` (${rec.year_written})` : '');
+
+  const genreClass = 'badge-' + (rec.genre || 'other');
+  let info = `<span class="badge ${genreClass}">${rec.genre}</span>`;
+  info += `<span>${(rec.text_length || 0).toLocaleString()} символов</span>`;
+  if (rec.is_translation) info += '<span>[перевод]</span>';
+  if (rec.translator) info += `<span>пер. ${rec.translator}</span>`;
+  if (reviews[rec.id]) info += ` <span class="badge badge-verified">✓ проверено ${reviews[rec.id]}</span>`;
+  document.getElementById('info').innerHTML = info;
+
+  // Render text
+  const textEl = document.getElementById('textContent');
+  if (tagsVisible && rec.text_tagged) {
+    textEl.innerHTML = renderTaggedHTML(rec.text_tagged);
+  } else {
+    textEl.textContent = rec.text || '';
+  }
+}
+
+function renderTaggedHTML(tagged) {
+  let html = escapeHTML(tagged);
+
+  // Process tags — order matters for nesting
+  // <scene>text</scene>
+  html = html.replace(/&lt;scene&gt;(.*?)&lt;\/scene&gt;/g,
+    '<span class="tag-scene">$1<span class="tag-label">сцена</span></span>');
+
+  // <speaker name="..." dir="..."/>
+  html = html.replace(/&lt;speaker name=&quot;([^&]+)&quot; dir=&quot;([^&]+)&quot;\/&gt;/g,
+    '<span class="tag-speaker-name">$1<span class="tag-label">говорит</span></span> <span class="tag-speaker-dir">($2)</span> ');
+
+  // <speaker name="..."/>
+  html = html.replace(/&lt;speaker name=&quot;([^&]+)&quot;\/&gt;/g,
+    '<span class="tag-speaker-name">$1<span class="tag-label">говорит</span></span> ');
+
+  // <stage>text</stage>
+  html = html.replace(/&lt;stage&gt;(.*?)&lt;\/stage&gt;/g,
+    '<span class="tag-stage">$1<span class="tag-label">ремарка</span></span>');
+
+  return html;
+}
+
+function escapeHTML(str) {
+  return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+
+function toggleTags() {
+  tagsVisible = !tagsVisible;
+  const btn = document.getElementById('toggleBtn');
+  btn.textContent = tagsVisible ? 'Разметка: ВКЛ' : 'Разметка: ВЫКЛ';
+  btn.classList.toggle('off', !tagsVisible);
+  if (currentIndex >= 0) renderRecord(dataset[currentIndex]);
+}
+
+function approveRecord() {
+  if (currentIndex < 0) return;
+  const rec = dataset[currentIndex];
+  const now = new Date().toISOString().replace('T', ' ').slice(0, 19);
+  reviews[rec.id] = now;
+  localStorage.setItem('corpus_reviews', JSON.stringify(reviews));
+  updateStatus();
+  renderRecord(rec);
+}
+
+function toggleComment() {
+  const panel = document.getElementById('commentPanel');
+  panel.classList.toggle('visible');
+  if (panel.classList.contains('visible')) {
+    document.getElementById('commentText').focus();
+  }
+}
+
+function saveComment() {
+  if (currentIndex < 0) return;
+  const rec = dataset[currentIndex];
+  const text = document.getElementById('commentText').value.trim();
+  if (!text) return;
+  const now = new Date().toISOString().replace('T', ' ').slice(0, 19);
+  if (!comments[rec.id]) comments[rec.id] = [];
+  comments[rec.id].push({ text, timestamp: now });
+  localStorage.setItem('corpus_comments', JSON.stringify(comments));
+  document.getElementById('commentText').value = '';
+  toggleComment();
+  updateStatus();
+}
+
+function updateStatus() {
+  const nReviews = Object.keys(reviews).length;
+  const nComments = Object.values(comments).reduce((s, arr) => s + arr.length, 0);
+  document.getElementById('statusCount').textContent =
+    `${nReviews} проверено, ${nComments} комментариев (из ${dataset.length} записей)`;
+
+  let log = '';
+  // Recent reviews
+  const recentReviews = Object.entries(reviews).sort((a, b) => b[1].localeCompare(a[1])).slice(0, 5);
+  for (const [id, ts] of recentReviews) {
+    log += `<div class="verified-item">✓ ${ts} — ${id.slice(0, 60)}</div>`;
+  }
+  // Recent comments
+  for (const [id, arr] of Object.entries(comments)) {
+    for (const c of arr.slice(-3)) {
+      log += `<div class="comment-item">✎ ${c.timestamp} — ${id.slice(0, 40)}: ${c.text.slice(0, 80)}</div>`;
+    }
+  }
+  document.getElementById('reviewLog').innerHTML = log;
+}
+
+function exportData() {
+  const data = { reviews, comments, exported: new Date().toISOString() };
+  const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `corpus_review_${new Date().toISOString().slice(0, 10)}.json`;
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
+updateStatus();
+</script>
+
+</body>
+</html>
