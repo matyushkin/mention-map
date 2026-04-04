@@ -27,17 +27,22 @@ DATA_DIR = None
 
 
 def load_dataset(data_dir: Path):
+    """Load metadata index only — texts loaded on demand."""
     global DATASET
     DATASET = []
+    meta_cols = [c for c in ["id", "title", "author", "genre", "year_written",
+                              "year_published", "text_length", "word_count",
+                              "is_translation", "translator", "source",
+                              "author_birth_year", "author_death_year",
+                              "license", "date_text"] if True]
     for f in sorted(data_dir.glob("works-*.parquet")):
-        t = pq.read_table(f)
-        cols = t.column_names
+        t = pq.read_table(f, columns=[c for c in meta_cols if c in pq.read_schema(str(f)).names])
         for i in range(t.num_rows):
-            rec = {}
-            for col in cols:
+            rec = {"_file": str(f), "_row": i}
+            for col in t.column_names:
                 rec[col] = t.column(col)[i].as_py()
             DATASET.append(rec)
-    print(f"Loaded {len(DATASET)} records")
+    print(f"Loaded {len(DATASET)} records (metadata only)")
 
     # Load saved reviews
     global REVIEWS, COMMENTS
@@ -57,6 +62,14 @@ def save_reviews():
 def get_random_record():
     rec = random.choice(DATASET)
     result = dict(rec)
+    # Load text on demand from parquet
+    f = Path(rec["_file"])
+    row = rec["_row"]
+    t = pq.read_table(f, columns=["text", "text_tagged"])
+    result["text"] = t.column("text")[row].as_py() or ""
+    result["text_tagged"] = t.column("text_tagged")[row].as_py() if "text_tagged" in t.column_names else ""
+    del result["_file"]
+    del result["_row"]
     result["_reviewed"] = REVIEWS.get(rec["id"], "")
     result["_comments"] = COMMENTS.get(rec["id"], [])
     return result
